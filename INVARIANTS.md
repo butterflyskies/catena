@@ -7,8 +7,16 @@ guarantees these; the mudlib may rely on them.
 Terminology:
 - **RoomKey**: a validated, namespaced string identifier (e.g. `"catena:cantina/main"`).
 - **Room registry**: the authoritative map from RoomKey → current room entity.
+- **Direction**: a newtype wrapping a validated, lowercased string. Standard compass
+  pairs (`north`/`south`, `east`/`west`, `up`/`down`) support `inverse()`.
+  Arbitrary strings (`"cupboard"`, `"behind_the_curtain"`) are first-class
+  directions without automatic inverses. Exits are named edges between rooms:
+  `HashMap<Direction, RoomKey>`.
 - **Container**: any entity that can hold other entities. A room is a container with exits. A backpack is a container without exits.
 - **WorldApi**: the engine-provided interface through which mudlib code interacts with the ECS.
+- **WorldMutation**: a declared state change applied atomically by the engine after
+  a handler chain or tick batch completes. Handlers and timers produce mutations;
+  only the engine executes them.
 
 ---
 
@@ -17,10 +25,13 @@ Terminology:
 **1.1** Every exit stored in any room's `Exits` component references a `RoomKey`
 that exists in the room registry.
 
-**1.2** If room A has an exit in direction D pointing to room B, then room B has
-a corresponding exit in the inverse direction pointing to A — unless the exit is
-explicitly marked one-way. The mechanism for marking an exit as one-way is the
-absence of a reciprocal exit in the destination room's `Exits` component.
+**1.2** If room A has an exit in direction D pointing to room B, and D has a
+standard inverse, then room B has a corresponding exit in the inverse direction
+pointing to A — unless the exit is explicitly one-way. Arbitrary directions
+without standard inverses (`"cupboard"`, `"trapdoor"`) are inherently one-way
+unless the mudlib explicitly creates a reciprocal exit. The mechanism for marking
+a standard-direction exit as one-way is the absence of a reciprocal exit in the
+destination room's `Exits` component.
 
 **1.3** Self-referencing exits (a room with an exit pointing to itself) are
 permitted. Circular corridors and treadmill rooms are valid game design.
@@ -37,6 +48,11 @@ add exit, remove exit), invariants 1.1–1.5 continue to hold.
 **1.7** `RoomKey` construction validates syntax: non-empty, contains a namespace
 separator, valid characters only. Invalid keys are rejected at creation and never
 stored in the registry.
+
+**1.8** `Direction` construction validates and lowercases the input string. Empty
+strings are rejected. `inverse()` returns `Some(opposite)` for standard compass
+pairs and `None` for arbitrary directions. The engine never assumes a direction
+has an inverse — callers must handle `None`.
 
 ---
 
@@ -70,17 +86,28 @@ available.
 the world shares its content identity key. `spawn_from_prefab(key)` fails if
 `Unique` is specified and an instance already exists.
 
+**2.7** Movement through an exit follows the arrival hook pipeline in strict
+sequence: `can_enter(destination)` → `on_arrive(entity, destination)` →
+`on_enter(entity, destination)` / `on_swap(entity, old, new)`. If `can_enter`
+returns false, the move is rejected and no subsequent hooks fire. Each hook runs
+to completion before the next begins. `on_swap` fires instead of `on_enter` when
+the movement is part of a hot-swap drain (section 4).
+
 ---
 
 ## 3. Session Lifecycle
 
-**3.1** Accepting a connection always produces exactly one player entity with both
-`InRoom` and `PlayerSession` components. No connection exists without a
-corresponding entity.
+**3.1** Session creation and destruction are `WorldMutation`s (`CreateSession`,
+`DestroySession`) processed through the same pipeline as all other mutations.
+Accepting a connection queues a `CreateSession` mutation that produces exactly one
+player entity with both `InRoom` and `PlayerSession` components. No connection
+exists without a corresponding entity.
 
-**3.2** Disconnection (clean quit or network drop) always despawns the player
-entity and releases all associated resources. No orphan player entities persist
-after disconnect.
+**3.2** Disconnection (clean quit or network drop) queues a `DestroySession`
+mutation that despawns the player entity and releases all associated resources.
+`SessionGuard`'s RAII `Drop` impl queues `DestroySession` — network drops are
+handled by the same mutation path as clean quits. No special cleanup code paths
+exist outside the pipeline. No orphan player entities persist after disconnect.
 
 **3.3** No two player entities share the same write channel (`WriteTx`). Each
 connection has a unique, non-aliased output path.
@@ -149,12 +176,15 @@ components.
 already-registered command replaces it. Unregistering a non-existent command is a
 no-op.
 
-**5.4** Command resolution is two-pass: the engine first collects all matching
-handlers from all providers, sorted by numeric priority. Then handlers execute in
-order, each receiving an immutable world view and returning an `Effects`
-declaration (output text, proposed mutations, conditional hints). The engine
-applies all effects atomically after the chain completes. No handler directly
-mutates world state.
+**5.4** Command resolution is two-pass with fold-and-apply semantics. First pass:
+the engine collects all matching handlers from all providers, sorted by numeric
+priority. Second pass: handlers execute in order. Each handler receives a scratch
+world that includes prior handlers' mutations (copy-on-write). The ring doesn't
+need to know about the sword — it reads current damage and multiplies. Each
+handler returns an `Effects` declaration (output text, proposed mutations,
+conditional hints). After the full chain completes, the engine applies the final
+accumulated mutations atomically. No handler directly mutates the real world
+state.
 
 **5.5** Each handler returns a disposition: `Final` (stop evaluation, this is the
 answer), `Continue` (apply as a layer, keep checking lower-priority handlers), or
@@ -174,6 +204,17 @@ equipped or unequipped, the affected command providers are updated in the same
 tick. No window exists where commands are available but the entity is not present,
 or vice versa.
 
+**5.9** Command resolution follows the provider chain: input → build command
+context → resolve against ordered providers (room → inventory → self → global) →
+dispatch. The global command registry is one provider among many, not privileged.
+It is not the sun. Provider order is mudlib-configurable via priority assignment.
+
+**5.10** The provider index is a materialized view, rebuilt on world state change
+via dirty-flag invalidation. Mutations that affect provider visibility
+(`MoveEntity`, `Equip`, `Unequip`) mark relevant entities dirty. The next
+dispatch reads the cache and rebuilds only dirty entries. Most ticks incur zero
+provider recomputation. The index is recomputed post atomic-apply, never mid-chain.
+
 ---
 
 ## 6. Scheduler / Timers
@@ -191,11 +232,17 @@ other timers, and does not corrupt world state.
 **6.4** Timer firing order respects scheduled time. Timers scheduled for the same
 tick fire in insertion order (FIFO). No starvation, no reordering.
 
-**6.5** The default tick rate is 1 Hz (one tick per second), configurable by the
+**6.5** Timers join the tick batch. Per tick: (1) drain command queue → command
+effects, (2) fire due timers → timer effects, (3) merge into one batch,
+(4) conflict resolve, (5) atomic apply. Timer effects and command effects share
+the same priority space. The engine does not distinguish effect origin after
+merge.
+
+**6.6** The default tick rate is 1 Hz (one tick per second), configurable by the
 mudlib. The minimum tick interval (floor) is 50ms (20 Hz). The engine refuses to
 start with a tick rate below the floor.
 
-**6.6** Under load, if a tick takes longer than its budget, the engine skips
+**6.7** Under load, if a tick takes longer than its budget, the engine skips
 missed ticks rather than catching up. The tick counter advances monotonically —
 no tick fires twice. Skipped ticks are logged. Timers due during skipped ticks
 are batched into the next executed tick.
