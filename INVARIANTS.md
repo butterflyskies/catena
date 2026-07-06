@@ -7,10 +7,11 @@ guarantees these; the mudlib may rely on them.
 Terminology:
 - **RoomKey**: a validated, namespaced string identifier (e.g. `"catena:cantina/main"`).
 - **Room registry**: the authoritative map from RoomKey → current room entity.
-- **Direction**: a newtype wrapping a validated, lowercased string. Standard compass
-  pairs (`north`/`south`, `east`/`west`, `up`/`down`) support `inverse()`.
-  Arbitrary strings (`"cupboard"`, `"behind_the_curtain"`) are first-class
-  directions without automatic inverses. Exits are named edges between rooms:
+- **Direction**: a validated string newtype. Any non-empty, printable-ASCII,
+  whitespace-free string up to 64 characters. Standard compass names (`"north"`,
+  `"south"`, etc.) and arbitrary strings (`"cupboard"`, `"behind_the_curtain"`)
+  are all first-class directions with no special treatment. The type carries no
+  inverse metadata. Exits are named edges between rooms:
   `HashMap<Direction, RoomKey>`.
 - **Container**: any entity that can hold other entities. A room is a container with exits. A backpack is a container without exits.
 - **WorldApi**: the engine-provided interface through which mudlib code interacts with the ECS.
@@ -25,13 +26,12 @@ Terminology:
 **1.1** Every exit stored in any room's `Exits` component references a `RoomKey`
 that exists in the room registry.
 
-**1.2** If room A has an exit in direction D pointing to room B, and D has a
-standard inverse, then room B has a corresponding exit in the inverse direction
-pointing to A — unless the exit is explicitly one-way. Arbitrary directions
-without standard inverses (`"cupboard"`, `"trapdoor"`) are inherently one-way
-unless the mudlib explicitly creates a reciprocal exit. The mechanism for marking
-a standard-direction exit as one-way is the absence of a reciprocal exit in the
-destination room's `Exits` component.
+**1.2** Bidirectional exit consistency is the mudlib's responsibility, not the
+engine's. Each `Exits::set()` call creates a single directional exit. To create a
+two-way passage, the mudlib calls `set()` on both rooms. One-way exits are the
+default — a passage is bidirectional only if the mudlib explicitly creates both
+directions. The engine provides the opaque `Exits` API; the mudlib decides which
+exits are reciprocal.
 
 **1.3** Self-referencing exits (a room with an exit pointing to itself) are
 permitted. Circular corridors and treadmill rooms are valid game design.
@@ -43,17 +43,31 @@ live room entity in the registry. The spawn point is never empty, never dangling
 the same key.
 
 **1.6** After any mutating operation on the room graph (add room, remove room,
-add exit, remove exit), invariants 1.1–1.5 continue to hold.
+add exit, remove exit), invariants 1.1–1.5 continue to hold. The opaque APIs of
+`Exits` (1.9) and the room registry (1.10) are the enforcement mechanism — all
+graph mutations flow through them.
 
 **1.7** `RoomKey` construction validates syntax: non-empty, contains a namespace
 separator, valid characters only. Invalid keys are rejected at creation and never
 stored in the registry.
 
-**1.8** `Direction` construction validates and lowercases the input string. Empty
-strings are rejected. `inverse()` returns `Some(opposite)` for standard compass
-pairs and `None` for arbitrary directions. The engine never assumes a direction
-has an inverse — callers must handle `None`.
+**1.8** `Direction` construction validates syntax: non-empty, printable ASCII
+only, no whitespace, ≤64 characters. Direction is a validated string — it carries
+no inverse metadata. Standard names like `"north"` are valid but receive no
+special treatment from the type system. Inverse relationships between directions
+are a mudlib-level convention, not an engine-level constraint.
 
+**1.9** The `Exits` component is an opaque newtype wrapping the backing map from
+`Direction` to `RoomKey`. Mutation goes through the `Exits` API. The backing
+container is private. Each `set()` call creates a single directional exit and
+returns the displaced target (if any). The engine does not generate reciprocal
+patches — bidirectional consistency is the mudlib's responsibility (see 1.2).
+
+**1.10** The room registry is an opaque newtype wrapping the backing map from
+`RoomKey` to entity. The backing container is private — callers use the public
+API (get, insert, remove, contains, iterate). This decouples call sites from the
+storage representation, allowing the backing store to change (e.g. from HashMap
+to a spatial index) without affecting the rest of the engine or the mudlib.
 ---
 
 ## 2. Entity Location
@@ -157,9 +171,19 @@ indefinitely. The state machine does not spontaneously advance.
 **4.7** The engine emits lifecycle events during drain-then-swap:
 `on_drain_start(old, new)`, `on_occupant_leave(old, entity)`,
 `on_drain_complete(old, new)`, `on_swap(new)`. The mudlib registers callbacks
-that return policy decisions (proceed, defer, force). The engine handles the
-transaction; the mudlib decides what goes where (item migration, NPC respawning,
-timer transfer, combat blocking).
+that return two kinds of policy decisions:
+
+- **`MigrationPolicy`** (per-entity routing): returned by `on_occupant_leave` to
+  decide where each entity goes during drain. `Proceed` sends the entity to the
+  replacement container, `Redirect(RoomKey)` sends it elsewhere, and `Reject`
+  keeps it in the draining container (retry next tick).
+- **`DrainPolicy`** (world-level timing): returned by `on_drain_start` and
+  `on_drain_complete` to control the overall pace of the lifecycle. `Proceed`
+  continues normally, `Defer` retries next tick, `Force` overrides conditions
+  (e.g. occupancy checks).
+
+The engine handles the transaction; the mudlib decides what goes where (item
+migration, NPC respawning, timer transfer, combat blocking).
 
 ---
 
