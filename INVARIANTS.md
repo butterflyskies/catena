@@ -43,17 +43,34 @@ live room entity in the registry. The spawn point is never empty, never dangling
 the same key.
 
 **1.6** After any mutating operation on the room graph (add room, remove room,
-add exit, remove exit), invariants 1.1–1.5 continue to hold.
+add exit, remove exit), invariants 1.1–1.5 continue to hold. The opaque APIs of
+`Exits` (1.9) and the room registry (1.10) are the enforcement mechanism — all
+graph mutations flow through them.
 
 **1.7** `RoomKey` construction validates syntax: non-empty, contains a namespace
 separator, valid characters only. Invalid keys are rejected at creation and never
 stored in the registry.
 
-**1.8** `Direction` construction validates and lowercases the input string. Empty
-strings are rejected. `inverse()` returns `Some(opposite)` for standard compass
-pairs and `None` for arbitrary directions. The engine never assumes a direction
-has an inverse — callers must handle `None`.
+**1.8** `Direction` construction validates syntax: non-empty, printable ASCII
+only, no whitespace, ≤64 characters. Every direction has a known inverse.
+Standard cardinal directions (north/south, east/west, up/down) provide built-in
+inverse pairs. Custom directions require an explicit inverse at construction. A
+direction cannot be its own inverse (self-referencing *exits* are valid per 1.3,
+but the direction itself must have a distinct reverse).
 
+**1.9** The `Exits` component is an opaque newtype wrapping the backing map from
+`Direction` to `RoomKey`. Mutation goes through the `Exits` API, which enforces
+bidirectional consistency (1.2) by construction: mutating methods return patch
+values describing the reciprocal operations the caller must apply to the
+destination room. The backing container is private — callers cannot bypass the
+consistency protocol. One-way exits are supported via an explicit one-way API
+that opts out of reciprocal patching.
+
+**1.10** The room registry is an opaque newtype wrapping the backing map from
+`RoomKey` to entity. The backing container is private — callers use the public
+API (get, insert, remove, contains, iterate). This decouples call sites from the
+storage representation, allowing the backing store to change (e.g. from HashMap
+to a spatial index) without affecting the rest of the engine or the mudlib.
 ---
 
 ## 2. Entity Location
