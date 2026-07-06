@@ -1,47 +1,26 @@
-//! Validated direction with inverse tracking.
+//! Validated direction name.
 //!
 //! Invariant 1.8: Direction construction validates syntax — non-empty, printable
-//! ASCII only, no whitespace, ≤64 characters. Every direction has an inverse.
-//! Standard cardinal directions provide built-in inverse pairs; custom directions
-//! require an explicit inverse at construction.
+//! ASCII only, no whitespace, ≤64 characters. Direction is a validated string;
+//! inverse relationships are not part of the type. Bidirectional exit consistency
+//! is the mudlib's responsibility (see invariant 1.2).
 
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 use serde::{Deserialize, Serialize};
 
 /// Maximum length of a direction string.
 const MAX_LEN: usize = 64;
 
-/// A validated direction with a known inverse.
+/// A validated direction name.
 ///
-/// Standard directions (north, south, east, west, up, down) have built-in
-/// inverses. Custom directions carry their inverse explicitly.
-///
-/// Identity is determined by `name` alone — two `Direction` values with the
-/// same name are equal regardless of their inverse field. This keeps
-/// `HashMap<Direction, _>` lookups consistent when the same direction name
-/// appears with different inverse metadata.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Direction is a validated string newtype — it carries no inverse metadata.
+/// Bidirectional exits are created by the mudlib calling `Exits::set()` twice
+/// (once for each direction). The engine does not enforce or assume inverse
+/// relationships between directions.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Direction {
-    /// The direction name (e.g. "north", "portal-in").
     name: String,
-    /// The inverse direction name (e.g. "south", "portal-out").
-    inverse: String,
-}
-
-impl PartialEq for Direction {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name
-    }
-}
-
-impl Eq for Direction {}
-
-impl Hash for Direction {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.name.hash(state);
-    }
 }
 
 /// Reasons a string cannot be a valid direction.
@@ -55,8 +34,6 @@ pub enum DirectionError {
     InvalidChar { offset: usize, ch: char },
     /// The input contains whitespace.
     Whitespace { offset: usize, ch: char },
-    /// A direction and its inverse are identical.
-    SelfInverse,
 }
 
 impl fmt::Display for DirectionError {
@@ -74,9 +51,6 @@ impl fmt::Display for DirectionError {
             }
             Self::Whitespace { offset, ch } => {
                 write!(f, "whitespace {ch:?} at byte offset {offset}")
-            }
-            Self::SelfInverse => {
-                write!(f, "a direction cannot be its own inverse")
             }
         }
     }
@@ -104,64 +78,20 @@ fn validate_direction_str(s: &str) -> Result<(), DirectionError> {
 }
 
 impl Direction {
-    /// Create a standard direction with a well-known inverse.
+    /// Create a direction from a validated string.
     ///
-    /// Recognized names: `north`, `south`, `east`, `west`, `up`, `down`.
-    /// Returns `None` if the name is not a standard direction.
-    pub fn standard(name: &str) -> Option<Self> {
-        let (name, inverse) = match name {
-            "north" => ("north", "south"),
-            "south" => ("south", "north"),
-            "east" => ("east", "west"),
-            "west" => ("west", "east"),
-            "up" => ("up", "down"),
-            "down" => ("down", "up"),
-            _ => return None,
-        };
-        Some(Self {
-            name: name.to_owned(),
-            inverse: inverse.to_owned(),
-        })
-    }
-
-    /// Create a custom direction with an explicit inverse.
-    ///
-    /// Both `name` and `inverse` are validated. They must not be identical —
-    /// a direction cannot be its own inverse (self-referencing *exits* are valid
-    /// per invariant 1.3, but a direction must still have a distinct reverse).
-    pub fn custom(
-        name: impl Into<String>,
-        inverse: impl Into<String>,
-    ) -> Result<Self, DirectionError> {
+    /// Accepts any non-empty, printable-ASCII, whitespace-free string up to
+    /// 64 characters. Standard names like `"north"` are valid but have no
+    /// special treatment — the type does not track inverses.
+    pub fn new(name: impl Into<String>) -> Result<Self, DirectionError> {
         let name = name.into();
-        let inverse = inverse.into();
-
         validate_direction_str(&name)?;
-        validate_direction_str(&inverse)?;
-
-        if name == inverse {
-            return Err(DirectionError::SelfInverse);
-        }
-
-        Ok(Self { name, inverse })
+        Ok(Self { name })
     }
 
     /// The direction name.
     pub fn name(&self) -> &str {
         &self.name
-    }
-
-    /// The inverse direction name.
-    pub fn inverse_name(&self) -> &str {
-        &self.inverse
-    }
-
-    /// Produce the inverse `Direction` (swapping name and inverse).
-    pub fn inverse(&self) -> Self {
-        Self {
-            name: self.inverse.clone(),
-            inverse: self.name.clone(),
-        }
     }
 }
 
@@ -175,76 +105,40 @@ impl fmt::Display for Direction {
 mod tests {
     use super::*;
 
-    // --- standard directions ---
+    // --- construction ---
 
     #[test]
-    fn standard_north() {
-        let dir = Direction::standard("north").unwrap();
-        assert_eq!(dir.name(), "north");
-        assert_eq!(dir.inverse_name(), "south");
-    }
-
-    #[test]
-    fn standard_round_trip() {
-        let north = Direction::standard("north").unwrap();
-        let south = north.inverse();
-        assert_eq!(south.name(), "south");
-        assert_eq!(south.inverse_name(), "north");
-        let north_again = south.inverse();
-        assert_eq!(north_again, north);
-    }
-
-    #[test]
-    fn all_standard_directions_exist() {
+    fn new_standard_names() {
         for name in &["north", "south", "east", "west", "up", "down"] {
-            assert!(
-                Direction::standard(name).is_some(),
-                "missing standard direction: {name}"
-            );
+            let dir = Direction::new(*name).unwrap();
+            assert_eq!(dir.name(), *name);
         }
     }
 
     #[test]
-    fn nonstandard_returns_none() {
-        assert!(Direction::standard("northwest").is_none());
-        assert!(Direction::standard("portal").is_none());
-    }
-
-    // --- custom directions ---
-
-    #[test]
-    fn custom_direction() {
-        let dir = Direction::custom("portal-in", "portal-out").unwrap();
+    fn new_custom_name() {
+        let dir = Direction::new("portal-in").unwrap();
         assert_eq!(dir.name(), "portal-in");
-        assert_eq!(dir.inverse_name(), "portal-out");
     }
 
     #[test]
-    fn custom_inverse_round_trip() {
-        let dir = Direction::custom("enter", "exit").unwrap();
-        let inv = dir.inverse();
-        assert_eq!(inv.name(), "exit");
-        assert_eq!(inv.inverse_name(), "enter");
-        assert_eq!(inv.inverse(), dir);
+    fn new_accepts_string() {
+        let dir = Direction::new(String::from("cupboard")).unwrap();
+        assert_eq!(dir.name(), "cupboard");
     }
 
     // --- validation ---
 
     #[test]
-    fn reject_empty_name() {
-        assert_eq!(Direction::custom("", "back"), Err(DirectionError::Empty));
-    }
-
-    #[test]
-    fn reject_empty_inverse() {
-        assert_eq!(Direction::custom("forward", ""), Err(DirectionError::Empty));
+    fn reject_empty() {
+        assert_eq!(Direction::new(""), Err(DirectionError::Empty));
     }
 
     #[test]
     fn reject_too_long() {
         let long = "a".repeat(MAX_LEN + 1);
         assert!(matches!(
-            Direction::custom(&long, "back"),
+            Direction::new(&long),
             Err(DirectionError::TooLong(_))
         ));
     }
@@ -252,7 +146,7 @@ mod tests {
     #[test]
     fn reject_whitespace() {
         assert!(matches!(
-            Direction::custom("north west", "south east"),
+            Direction::new("north west"),
             Err(DirectionError::Whitespace { .. })
         ));
     }
@@ -260,40 +154,39 @@ mod tests {
     #[test]
     fn reject_non_ascii() {
         assert!(matches!(
-            Direction::custom("n\u{00f6}rd", "s\u{00fc}d"),
+            Direction::new("n\u{00f6}rd"),
             Err(DirectionError::InvalidChar { .. })
         ));
     }
 
     #[test]
-    fn reject_self_inverse() {
-        assert_eq!(
-            Direction::custom("loop", "loop"),
-            Err(DirectionError::SelfInverse)
-        );
+    fn reject_control_chars() {
+        assert!(matches!(
+            Direction::new("north\x01"),
+            Err(DirectionError::InvalidChar { .. })
+        ));
     }
 
     #[test]
     fn exactly_max_length_ok() {
         let name = "a".repeat(MAX_LEN);
-        let inv = "b".repeat(MAX_LEN);
-        assert!(Direction::custom(&name, &inv).is_ok());
+        assert!(Direction::new(&name).is_ok());
     }
 
     // --- trait impls ---
 
     #[test]
     fn display() {
-        let dir = Direction::standard("east").unwrap();
+        let dir = Direction::new("east").unwrap();
         assert_eq!(format!("{dir}"), "east");
     }
 
     #[test]
     fn hash_and_eq() {
         use std::collections::HashSet;
-        let a = Direction::standard("north").unwrap();
-        let b = Direction::standard("north").unwrap();
-        let c = Direction::standard("south").unwrap();
+        let a = Direction::new("north").unwrap();
+        let b = Direction::new("north").unwrap();
+        let c = Direction::new("south").unwrap();
         let mut set = HashSet::new();
         set.insert(a.clone());
         assert!(set.contains(&b));
@@ -301,20 +194,10 @@ mod tests {
     }
 
     #[test]
-    fn eq_and_hash_ignore_inverse() {
-        use std::collections::HashMap;
-        // Two directions with the same name but different inverse fields
-        let a = Direction::custom("portal", "portal-out").unwrap();
-        let b = Direction::custom("portal", "portal-back").unwrap();
-
-        // They compare equal
+    fn derived_eq_is_structural() {
+        let a = Direction::new("north").unwrap();
+        let b = Direction::new("north").unwrap();
         assert_eq!(a, b);
-
-        // They hash to the same bucket — inserting both into a map yields one entry
-        let mut map = HashMap::new();
-        map.insert(a.clone(), 1);
-        map.insert(b.clone(), 2);
-        assert_eq!(map.len(), 1);
-        assert_eq!(map[&a], 2);
+        assert_ne!(a, Direction::new("south").unwrap());
     }
 }

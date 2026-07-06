@@ -37,10 +37,30 @@ pub enum ReloadState {
     Swapped,
 }
 
-/// Policy decision returned by mudlib drain callbacks (invariant 4.7).
+/// Per-entity migration routing during drain (invariant 4.7).
+///
+/// Returned by mudlib callbacks to decide where each entity goes as a
+/// container drains. This is per-entity routing — the mudlib examines each
+/// occupant and decides its fate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum MigrationPolicy {
+    /// Allow the entity to migrate to the replacement container.
+    Proceed,
+    /// Redirect the entity to a different room instead of the replacement.
+    Redirect(crate::room_key::RoomKey),
+    /// Reject migration — the entity should not leave the draining container
+    /// yet (e.g. combat lock, ongoing interaction). The engine will retry on
+    /// subsequent ticks.
+    Reject,
+}
+
+/// World-level drain timing policy (invariant 4.7).
+///
+/// Returned by mudlib callbacks to control the overall pace of the
+/// drain-then-swap lifecycle. This is a world-level decision, not per-entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SwapDecision {
-    /// Proceed with the drain/swap step.
+pub enum DrainPolicy {
+    /// Proceed with the drain/swap step normally.
     Proceed,
     /// Defer this step — try again next tick.
     Defer,
