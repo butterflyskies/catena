@@ -9,9 +9,6 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum length of a direction string.
-const MAX_LEN: usize = 64;
-
 /// A validated direction name.
 ///
 /// Direction is a validated string newtype — it carries no inverse metadata.
@@ -42,7 +39,7 @@ impl fmt::Display for DirectionError {
         match self {
             Self::Empty => write!(f, "direction must not be empty"),
             Self::TooLong(len) => {
-                write!(f, "direction is {len} chars, maximum is {MAX_LEN}")
+                write!(f, "direction is {len} chars, maximum is {}", Direction::MAX_LEN)
             }
             Self::InvalidChar { offset, ch } => {
                 write!(
@@ -64,7 +61,7 @@ fn validate_direction_str(s: &str) -> Result<(), DirectionError> {
     if s.is_empty() {
         return Err(DirectionError::Empty);
     }
-    if s.len() > MAX_LEN {
+    if s.len() > Direction::MAX_LEN {
         return Err(DirectionError::TooLong(s.len()));
     }
     for (offset, ch) in s.char_indices() {
@@ -79,6 +76,9 @@ fn validate_direction_str(s: &str) -> Result<(), DirectionError> {
 }
 
 impl Direction {
+    /// Maximum length of a direction string.
+    pub const MAX_LEN: usize = 64;
+
     /// Create a direction from a validated string.
     ///
     /// Accepts any non-empty, printable-ASCII, whitespace-free string up to
@@ -128,6 +128,14 @@ impl fmt::Display for Direction {
 mod tests {
     use super::*;
 
+    fn north() -> Direction {
+        Direction::new("north").unwrap()
+    }
+
+    fn south() -> Direction {
+        Direction::new("south").unwrap()
+    }
+
     // --- construction ---
 
     #[test]
@@ -159,7 +167,7 @@ mod tests {
 
     #[test]
     fn reject_too_long() {
-        let long = "a".repeat(MAX_LEN + 1);
+        let long = "a".repeat(Direction::MAX_LEN + 1);
         assert!(matches!(
             Direction::new(&long),
             Err(DirectionError::TooLong(_))
@@ -192,7 +200,7 @@ mod tests {
 
     #[test]
     fn exactly_max_length_ok() {
-        let name = "a".repeat(MAX_LEN);
+        let name = "a".repeat(Direction::MAX_LEN);
         assert!(Direction::new(&name).is_ok());
     }
 
@@ -207,21 +215,16 @@ mod tests {
     #[test]
     fn hash_and_eq() {
         use std::collections::HashSet;
-        let a = Direction::new("north").unwrap();
-        let b = Direction::new("north").unwrap();
-        let c = Direction::new("south").unwrap();
         let mut set = HashSet::new();
-        set.insert(a.clone());
-        assert!(set.contains(&b));
-        assert!(!set.contains(&c));
+        set.insert(north());
+        assert!(set.contains(&north()));
+        assert!(!set.contains(&south()));
     }
 
     #[test]
     fn derived_eq_is_structural() {
-        let a = Direction::new("north").unwrap();
-        let b = Direction::new("north").unwrap();
-        assert_eq!(a, b);
-        assert_ne!(a, Direction::new("south").unwrap());
+        assert_eq!(north(), north());
+        assert_ne!(north(), south());
     }
 
     // --- serde ---
@@ -288,7 +291,7 @@ mod tests {
 
             #[test]
             fn too_long_rejected(s in "[a-z]{65,128}") {
-                assert!(s.len() > MAX_LEN);
+                assert!(s.len() > Direction::MAX_LEN);
                 assert!(matches!(Direction::new(s), Err(DirectionError::TooLong(_))));
             }
 
