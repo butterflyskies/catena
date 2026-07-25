@@ -1,8 +1,7 @@
 //! ECS components referenced by the engine invariants.
 
-use std::fmt;
-
 use hecs::Entity;
+use nutype::nutype;
 use serde::{Deserialize, Serialize};
 
 use crate::exits::Exits;
@@ -15,139 +14,22 @@ pub struct InRoom(pub Entity);
 
 /// Human-readable room name, displayed to players.
 ///
-/// Construction is fallible — names must be non-empty and within
-/// [`RoomName::MAX_LEN`] characters.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "String", try_from = "String")]
+/// Construction is fallible — names must be non-empty and within 200 characters.
+#[nutype(
+    validate(not_empty, len_char_max = 200),
+    derive(Clone, Debug, PartialEq, Eq, Display, AsRef, Into, TryFrom, Serialize, Deserialize)
+)]
 pub struct RoomName(String);
-
-/// Reasons a string cannot be a valid [`RoomName`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum RoomNameError {
-    Empty,
-    TooLong(usize),
-}
-
-impl fmt::Display for RoomNameError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Empty => write!(f, "room name must not be empty"),
-            Self::TooLong(len) => {
-                write!(f, "room name is {len} chars, maximum is {}", RoomName::MAX_LEN)
-            }
-        }
-    }
-}
-
-impl std::error::Error for RoomNameError {}
-
-impl RoomName {
-    /// Maximum length of a room name in characters.
-    pub const MAX_LEN: usize = 200;
-
-    pub fn new(name: impl Into<String>) -> Result<Self, RoomNameError> {
-        let name = name.into();
-        if name.is_empty() {
-            return Err(RoomNameError::Empty);
-        }
-        if name.len() > Self::MAX_LEN {
-            return Err(RoomNameError::TooLong(name.len()));
-        }
-        Ok(Self(name))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<RoomName> for String {
-    fn from(n: RoomName) -> Self {
-        n.0
-    }
-}
-
-impl TryFrom<String> for RoomName {
-    type Error = RoomNameError;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl fmt::Display for RoomName {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// Room description text, displayed on `look`.
 ///
-/// Construction is fallible — descriptions must be within
-/// [`Description::MAX_LEN`] characters. Empty descriptions are allowed (a room
-/// can be indescribable).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(into = "String", try_from = "String")]
+/// Construction is fallible — descriptions must be within 8000 characters.
+/// Empty descriptions are allowed (a room can be indescribable).
+#[nutype(
+    validate(len_char_max = 8000),
+    derive(Clone, Debug, PartialEq, Eq, Display, AsRef, Into, TryFrom, Serialize, Deserialize)
+)]
 pub struct Description(String);
-
-/// Reasons a string cannot be a valid [`Description`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DescriptionError {
-    TooLong(usize),
-}
-
-impl fmt::Display for DescriptionError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::TooLong(len) => {
-                write!(
-                    f,
-                    "description is {len} chars, maximum is {}",
-                    Description::MAX_LEN
-                )
-            }
-        }
-    }
-}
-
-impl std::error::Error for DescriptionError {}
-
-impl Description {
-    /// Maximum length of a room description in characters.
-    pub const MAX_LEN: usize = 8_000;
-
-    pub fn new(text: impl Into<String>) -> Result<Self, DescriptionError> {
-        let text = text.into();
-        if text.len() > Self::MAX_LEN {
-            return Err(DescriptionError::TooLong(text.len()));
-        }
-        Ok(Self(text))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<Description> for String {
-    fn from(d: Description) -> Self {
-        d.0
-    }
-}
-
-impl TryFrom<String> for Description {
-    type Error = DescriptionError;
-
-    fn try_from(s: String) -> Result<Self, Self::Error> {
-        Self::new(s)
-    }
-}
-
-impl fmt::Display for Description {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
 
 /// Exits attached to a room entity. See [`Exits`] for the opaque API.
 pub type RoomExits = Exits;
@@ -181,30 +63,30 @@ mod tests {
 
     #[test]
     fn room_name_valid() {
-        let name = RoomName::new("The Cantina").unwrap();
-        assert_eq!(name.as_str(), "The Cantina");
+        let name = RoomName::try_new("The Cantina").unwrap();
+        assert_eq!(name.as_ref(), "The Cantina");
     }
 
     #[test]
     fn room_name_reject_empty() {
-        assert_eq!(RoomName::new(""), Err(RoomNameError::Empty));
+        assert!(RoomName::try_new("").is_err());
     }
 
     #[test]
     fn room_name_reject_too_long() {
-        let long = "x".repeat(RoomName::MAX_LEN + 1);
-        assert!(matches!(RoomName::new(&long), Err(RoomNameError::TooLong(_))));
+        let long = "x".repeat(201);
+        assert!(RoomName::try_new(&long).is_err());
     }
 
     #[test]
     fn room_name_exactly_max_ok() {
-        let name = "x".repeat(RoomName::MAX_LEN);
-        assert!(RoomName::new(&name).is_ok());
+        let name = "x".repeat(200);
+        assert!(RoomName::try_new(&name).is_ok());
     }
 
     #[test]
     fn room_name_serde_round_trip() {
-        let name = RoomName::new("The Void").unwrap();
+        let name = RoomName::try_new("The Void").unwrap();
         let json = serde_json::to_string(&name).unwrap();
         let back: RoomName = serde_json::from_str(&json).unwrap();
         assert_eq!(name, back);
@@ -212,24 +94,24 @@ mod tests {
 
     #[test]
     fn description_valid() {
-        let desc = Description::new("A dimly lit room.").unwrap();
-        assert_eq!(desc.as_str(), "A dimly lit room.");
+        let desc = Description::try_new("A dimly lit room.").unwrap();
+        assert_eq!(desc.as_ref(), "A dimly lit room.");
     }
 
     #[test]
     fn description_allows_empty() {
-        assert!(Description::new("").is_ok());
+        assert!(Description::try_new("").is_ok());
     }
 
     #[test]
     fn description_reject_too_long() {
-        let long = "x".repeat(Description::MAX_LEN + 1);
-        assert!(matches!(Description::new(&long), Err(DescriptionError::TooLong(_))));
+        let long = "x".repeat(8001);
+        assert!(Description::try_new(&long).is_err());
     }
 
     #[test]
     fn description_serde_round_trip() {
-        let desc = Description::new("You are in a maze of twisty passages.").unwrap();
+        let desc = Description::try_new("You are in a maze of twisty passages.").unwrap();
         let json = serde_json::to_string(&desc).unwrap();
         let back: Description = serde_json::from_str(&json).unwrap();
         assert_eq!(desc, back);

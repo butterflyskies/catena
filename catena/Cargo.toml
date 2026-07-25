@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 hecs = "0.10"
+nutype = { version = "0.7", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
